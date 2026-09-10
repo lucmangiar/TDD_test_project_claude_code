@@ -11,4 +11,4 @@ dist/
 .coverage
 htmlcov/
 .DS_Store
-btcusdt.html
+btcusdt.html.tmp

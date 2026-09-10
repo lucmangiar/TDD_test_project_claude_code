@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BTCUSDT across brokers</title><style>body{font:14px/1.5 system-ui,sans-serif;margin:2rem auto;max-width:44rem;color:#1c1b19;background:#faf9f7}h1{font-size:1.25rem;margin:0 0 .25rem}.summary{margin:.25rem 0 1.25rem;color:#4a463f}.none{color:#a8321f}table{border-collapse:collapse;width:100%}th,td{padding:.5rem .75rem;border-bottom:1px solid #e4dfd5;text-align:left}th{font-size:.75rem;letter-spacing:.08em;text-transform:uppercase;color:#6c675e}.num{font-variant-numeric:tabular-nums;text-align:right}.delta{color:#6c675e}#failures{margin-top:1.5rem;font-size:.875rem;color:#6c675e}#failures:empty{display:none}button{font:inherit;padding:.3rem .7rem;border:1px solid #cfc8bb;border-radius:4px;background:#fff;cursor:pointer}footer{margin-top:1.5rem;font-size:.75rem;color:#8b857a}</style></head><body><h1>BTCUSDT spot rate</h1><p class="summary" id="summary">Median <b>76890.80 USDT</b> &middot; spread 22.52 USDT across 4 brokers</p><p><button id="refresh" type="button">Refresh now</button></p><table><thead><tr><th>Broker</th><th class="num">Price (USDT)</th><th class="num">vs median</th></tr></thead><tbody id="rows"><tr><td>binance</td><td class="num">76877.48</td><td class="num delta">-13.32</td></tr><tr><td>okx</td><td class="num">76884.00</td><td class="num delta">-6.80</td></tr><tr><td>bybit</td><td class="num">76897.60</td><td class="num delta">+6.80</td></tr><tr><td>kraken</td><td class="num">76900.00</td><td class="num delta">+9.20</td></tr></tbody></table><section id="failures"></section><footer>Updated <span id="stamp">2026-09-10T22:38:58.873926+00:00</span>. This page re-polls every broker directly, every 30 minutes. Prices are quoted in USDT, a US-dollar-pegged stablecoin, so they track the dollar value of the asset but are not a USD rate.</footer><script type="application/json" id="cfg">{"refreshSeconds": 1800, "symbol": "BTCUSDT", "brokers": [{"name": "binance", "url": "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT", "path": ["price"]}, {"name": "okx", "url": "https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT", "path": ["data", 0, "last"]}, {"name": "bybit", "url": "https://api.bybit.com/v5/market/tickers?category=spot&symbol=BTCUSDT", "path": ["result", "list", 0, "lastPrice"]}, {"name": "kraken", "url": "https://api.kraken.com/0/public/Ticker?pair=XBTUSDT", "path": ["result", "*", "c", 0]}]}</script><script>
+const CFG = JSON.parse(document.getElementById("cfg").textContent);
+const $ = (id) => document.getElementById(id);
+
+function dig(payload, path) {
+  let node = payload;
+  for (const step of path) {
+    node = step === "*" ? Object.values(node)[0] : node[step];
+    if (node === undefined || node === null) throw new Error("unexpected payload shape");
+  }
+  return Number(node);
+}
+
+function median(values) {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+function cell(text, className) {
+  const td = document.createElement("td");
+  td.textContent = text;
+  if (className) td.className = className;
+  return td;
+}
+
+async function poll(broker) {
+  const response = await fetch(broker.url, { cache: "no-store" });
+  if (!response.ok) throw new Error("HTTP " + response.status);
+  const price = dig(await response.json(), broker.path);
+  if (!(price > 0)) throw new Error("non-positive price");
+  return { broker: broker.name, price };
+}
+
+async function refresh() {
+  $("refresh").disabled = true;
+  const settled = await Promise.allSettled(CFG.brokers.map(poll));
+  const quotes = [];
+  const failures = [];
+  settled.forEach((outcome, index) => {
+    if (outcome.status === "fulfilled") quotes.push(outcome.value);
+    else failures.push({ broker: CFG.brokers[index].name, reason: String(outcome.reason) });
+  });
+
+  const body = $("rows");
+  body.textContent = "";
+  if (quotes.length === 0) {
+    const row = document.createElement("tr");
+    const only = cell("No broker returned a usable quote.", "none");
+    only.colSpan = 3;
+    row.appendChild(only);
+    body.appendChild(row);
+    $("summary").textContent = "No broker returned a usable quote.";
+    $("summary").className = "summary none";
+  } else {
+    const prices = quotes.map((q) => q.price);
+    const mid = median(prices);
+    quotes.sort((a, b) => a.price - b.price);
+    for (const q of quotes) {
+      const row = document.createElement("tr");
+      const delta = q.price - mid;
+      row.appendChild(cell(q.broker));
+      row.appendChild(cell(q.price.toFixed(2), "num"));
+      row.appendChild(cell((delta > 0 ? "+" : "") + delta.toFixed(2), "num delta"));
+      body.appendChild(row);
+    }
+    const spread = Math.max(...prices) - Math.min(...prices);
+    $("summary").className = "summary";
+    $("summary").textContent =
+      "Median " + mid.toFixed(2) + " USDT \u00b7 spread " + spread.toFixed(2) +
+      " USDT across " + quotes.length + " brokers";
+  }
+
+  const list = $("failures");
+  list.textContent = "";
+  if (failures.length) {
+    const heading = document.createElement("h2");
+    heading.textContent = "Unavailable";
+    list.appendChild(heading);
+    const ul = document.createElement("ul");
+    for (const failure of failures) {
+      const li = document.createElement("li");
+      li.textContent = failure.broker + " \u2014 " + failure.reason;
+      ul.appendChild(li);
+    }
+    list.appendChild(ul);
+  }
+
+  $("stamp").textContent = new Date().toISOString();
+  $("refresh").disabled = false;
+}
+
+$("refresh").addEventListener("click", refresh);
+setInterval(refresh, CFG.refreshSeconds * 1000);
+refresh();
+</script></body></html>
