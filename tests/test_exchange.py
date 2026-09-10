@@ -19,12 +19,16 @@ import pytest
 
 from taskqueue.exchange import (
     BROKER_NAMES,
+    DEFAULT_PAIR,
+    REFRESH_SECONDS,
     BrokerError,
     BrokerFailure,
     InvalidQuoteError,
+    Pair,
     Quote,
     RateReport,
     RateUnavailableError,
+    broker_url,
     fetch_quote,
     fetch_report,
     http_fetcher,
@@ -325,3 +329,111 @@ def test_render_html_trims_broker_precision_to_cents() -> None:
     assert ">77978.30<" in html
     assert "Median <b>77975.16 USDT</b>" in html
     assert "spread 6.29 USDT" in html
+
+
+# --- Pair -------------------------------------------------------------------
+
+
+def test_pair_builds_the_exchange_symbol_from_base_and_quote() -> None:
+    pair = Pair(base="btc", quote="usdt")
+    assert pair.base == "BTC"
+    assert pair.quote == "USDT"
+    assert pair.symbol == "BTCUSDT"
+
+
+def test_default_pair_is_btcusdt() -> None:
+    assert DEFAULT_PAIR.symbol == "BTCUSDT"
+
+
+def test_pair_rejects_a_quote_currency_that_is_not_usdt() -> None:
+    with pytest.raises(InvalidQuoteError, match="USDT"):
+        Pair(base="BTC", quote="EUR")
+
+
+def test_pair_rejects_an_empty_base_currency() -> None:
+    with pytest.raises(InvalidQuoteError, match="base currency"):
+        Pair(base="", quote="USDT")
+
+
+# --- broker_url -------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("broker", "expected_symbol"),
+    [
+        ("binance", "BTCUSDT"),
+        ("okx", "BTC-USDT"),
+        ("bybit", "BTCUSDT"),
+        ("kraken", "XBTUSDT"),
+    ],
+)
+def test_broker_url_uses_each_brokers_own_symbol_spelling(
+    broker: str, expected_symbol: str
+) -> None:
+    url = broker_url(broker, DEFAULT_PAIR)
+    assert url.startswith("https://")
+    assert expected_symbol in url
+
+
+def test_broker_url_leaves_non_bitcoin_bases_alone_on_kraken() -> None:
+    assert "ETHUSDT" in broker_url("kraken", Pair(base="ETH", quote="USDT"))
+
+
+def test_broker_url_rejects_an_unknown_broker() -> None:
+    with pytest.raises(BrokerError, match="unknown broker"):
+        broker_url("not-a-broker", DEFAULT_PAIR)
+
+
+# --- pair-aware fetching ----------------------------------------------------
+
+
+def test_fetch_quote_requests_the_pair_it_was_given() -> None:
+    fetcher = RecordingFetcher(bodies={"binance": json.dumps({"price": "3000.00"})})
+    q = fetch_quote("binance", fetcher, pair=Pair(base="ETH", quote="USDT"))
+    assert q.symbol == "ETHUSDT"
+    assert q.price == Decimal("3000.00")
+    assert "ETHUSDT" in fetcher.urls[0]
+
+
+def test_fetch_report_labels_every_quote_with_the_requested_pair() -> None:
+    fetcher = RecordingFetcher()
+    report = fetch_report(
+        fetcher, generated_at=FIXED_TIME, pair=Pair(base="ETH", quote="USDT")
+    )
+    assert {q.symbol for q in report.quotes} == {"ETHUSDT"}
+    assert len(fetcher.urls) == len(BROKER_NAMES)
+    assert all("ETH" in url for url in fetcher.urls)
+
+
+# --- self-refreshing page ---------------------------------------------------
+
+
+def test_refresh_interval_is_thirty_minutes() -> None:
+    assert REFRESH_SECONDS == 1800
+
+
+def test_render_html_embeds_the_refresh_interval() -> None:
+    report = RateReport(
+        quotes=(quote("binance", "64000.10"),), failures=(), generated_at=FIXED_TIME
+    )
+    html = render_html(report)
+    assert "1800" in html
+    assert "every 30 minutes" in html
+
+
+def test_render_html_embeds_every_broker_endpoint_for_the_browser() -> None:
+    report = RateReport(
+        quotes=(quote("binance", "64000.10"),), failures=(), generated_at=FIXED_TIME
+    )
+    html = render_html(report)
+    for name in BROKER_NAMES:
+        assert broker_url(name, DEFAULT_PAIR) in html
+
+
+def test_render_html_honours_a_custom_refresh_interval() -> None:
+    report = RateReport(
+        quotes=(quote("binance", "64000.10"),), failures=(), generated_at=FIXED_TIME
+    )
+    html = render_html(report, refresh_seconds=60)
+    assert "every 1 minutes" in html or "every minute" in html
+    assert '"refreshSeconds": 60' in html or "refreshSeconds\": 60" in html
